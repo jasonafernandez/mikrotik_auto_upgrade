@@ -1,0 +1,94 @@
+:local updateChannel "testing"
+
+system package update set channel=$updateChannel
+:log info ("[Auto-Upgrade] Set update channel to: " . $updateChannel)
+
+:local rbFlag "pending_routerboard_upgrade.flag"
+:local currentFW [/system routerboard get current-firmware]
+:local latestFW [/system routerboard get upgrade-firmware]
+
+:if ($currentFW != $latestFW && $latestFW != "") do={
+    :log warning ("[Auto-Upgrade] RouterBOARD firmware is outdated (" . $currentFW . " -> " . $latestFW . "). Upgrading now...")
+    /system routerboard upgrade
+    :log warning "[Auto-Upgrade] Creating pending RouterBOARD upgrade flag and rebooting to apply RouterBOARD firmware upgrade."
+    :if ([/file find name=$rbFlag] != "") do={
+        /file remove [find name=$rbFlag]
+    }
+    /file add name=$rbFlag contents="pending_routerboard"
+    /system reboot
+} else={
+    :log info "[Auto-Upgrade] RouterBOARD firmware is up to date."
+    :if ([/file find name=$rbFlag] != "") do={
+        /file remove [find name=$rbFlag]
+        :log info "[Auto-Upgrade] Removed stale RouterBOARD upgrade flag."
+    }
+}
+
+ /system package update check-for-updates
+:log info "[Auto-Upgrade] Checking for RouterOS updates..."
+:local waitCount 0
+:local maxWait 30
+:local statusStr ""
+:do {
+    :set statusStr [/system package update get status]
+    :if ($statusStr = "Downloading" || $statusStr = "Checking") do={
+        :delay 2
+        :set waitCount ($waitCount + 1)
+    }
+} while=($waitCount < $maxWait && ($statusStr = "Downloading" || $statusStr = "Checking"))
+
+:local installedVer [/system package update get installed-version]
+:local latestVer [/system package update get latest-version]
+:local statusStr [/system package update get status]
+:local channelNow [/system package update get channel]
+
+:if ($installedVer = "") do={ :set installedVer "Unknown" }
+:if ($latestVer = "") do={ :set latestVer "Unknown" }
+:if ($statusStr = "") do={ :set statusStr "Unknown" }
+:if ($channelNow = "") do={ :set channelNow "Unknown" }
+
+:local devIP "Unknown"
+:foreach aID in=[/ip address find] do={
+    :local ipVal [/ip address get $aID address]
+    :if ([:find $ipVal "/"] != -1) do={
+        :set ipVal [:pick $ipVal 0 [:find $ipVal "/"]]
+    }
+    :if ($devIP = "Unknown" && [:pick $ipVal 0 3] != "127") do={ :set devIP $ipVal }
+}
+
+:log info ("[Auto-Upgrade] Device IP: " . $devIP)
+:log info ("[Auto-Upgrade] Installed: " . $installedVer . ", Latest: " . $latestVer . ", Status: " . $statusStr . ", Channel: " . $channelNow)
+
+:if ($installedVer != $latestVer && $statusStr = "New version is available") do={
+    :log warning ("[Auto-Upgrade] New RouterOS version available: " . $latestVer . ". Downloading and preparing upgrade...")
+
+    /system package update download
+    :local dlWait 0
+    :local dlStatus ""
+    :do {
+        :set dlStatus [/system package update get status]
+        :if ($dlStatus = "Downloading" || $dlStatus = "Scheduled for install") do={
+            :delay 2
+            :set dlWait ($dlWait + 1)
+        }
+    } while=($dlWait < $maxWait && ($dlStatus = "Downloading" || $dlStatus = "Scheduled for install"))
+
+    :local dlOk false
+    :if ($dlStatus = "Downloaded") do={ :set dlOk true }
+    :if ($dlStatus = "Ready for install") do={ :set dlOk true }
+    :if ($dlStatus = "Downloaded, please reboot router to upgrade it") do={ :set dlOk true }
+    :if ($dlOk) do={
+        :log warning "[Auto-Upgrade] Upgrade package downloaded. Creating pending RouterBOARD upgrade flag and rebooting."
+        :if ([/file find name=$rbFlag] != "") do={
+            /file remove [find name=$rbFlag]
+        }
+        /file add name=$rbFlag contents="pending_routerboard"
+        :log warning "[Auto-Upgrade] Rebooting router to apply RouterOS upgrade. RouterBOARD firmware will be checked on next run."
+        /system reboot
+    } else={
+        :log error ("[Auto-Upgrade] Failed to download upgrade package. Status: " . $dlStatus)
+    }
+} else={
+    :log info ("[Auto-Upgrade] RouterOS is up to date: " . $installedVer)
+    :log info "[Auto-Upgrade] No upgrade actions required."
+}
